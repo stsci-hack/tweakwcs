@@ -623,6 +623,7 @@ class WCSGroupCatalog(object):
             col_id = table.MaskedColumn(image.catalog['id'])
             col_x = table.MaskedColumn(image.catalog['x'], dtype=np.float64)
             col_y = table.MaskedColumn(image.catalog['y'], dtype=np.float64)
+            col_flux = table.MaskedColumn(image.catalog['flux'], dtype=np.float64)
             ra, dec = image.det_to_world(
                 image.catalog['x'], image.catalog['y']
             )
@@ -635,14 +636,14 @@ class WCSGroupCatalog(object):
 
                 cat = table.Table(
                     [col_imcatidx, col_catname, col_id, col_x,
-                     col_y, col_ra, col_dec, col_wght],
+                     col_y, col_flux, col_ra, col_dec, col_wght],
                     masked=True
                 )
 
             else:
                 cat = table.Table(
                     [col_imcatidx, col_catname, col_id, col_x,
-                     col_y, col_ra, col_dec],
+                     col_y, col_flux, col_ra, col_dec],
                     masked=True
                 )
 
@@ -665,12 +666,13 @@ class WCSGroupCatalog(object):
             col_id = table.MaskedColumn(image.catalog['id'])
             col_x = table.MaskedColumn([], name='x', dtype=np.float64)
             col_y = table.MaskedColumn([], name='y', dtype=np.float64)
+            col_flux = table.MaskedColumn([], name='flux', dtype=np.float64)
             col_ra = table.MaskedColumn([], name='RA', dtype=np.float64)
             col_dec = table.MaskedColumn([], name='DEC', dtype=np.float64)
 
             cat = table.Table(
                 [col_imcatidx, col_catname, col_id, col_x,
-                 col_y, col_ra, col_dec],
+                 col_y, col_flux, col_ra, col_dec],
                 masked=True
             )
 

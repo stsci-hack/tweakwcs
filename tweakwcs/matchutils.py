@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import astropy
+from scipy.spatial import distance_matrix
+from scipy import stats
 
 import stsci.imagestats as imagestats
 from stsci.stimage import xyxymatch
@@ -24,8 +26,8 @@ from . import __version__, __version_date__
 
 __author__ = 'Mihai Cara'
 
-__all__ = ['MatchCatalogs', 'TPMatch', 'center_of_mass', 'build_xy_zeropoint',
-           'find_xy_peak']
+__all__ = ['MatchCatalogs', 'TPMatch', 'TPIMatch',
+           'center_of_mass', 'build_xy_zeropoint', 'find_xy_peak']
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -275,6 +277,276 @@ class TPMatch(MatchCatalogs):
             tolerance=ps * tolerance,
             separation=ps * self._separation
         )
+
+        return matches['ref_idx'], matches['input_idx']
+
+class TPIMatch(MatchCatalogs):
+    """ Catalog source matching in tangent plane. Uses ``xyxymatch``
+    algorithm to cross-match sources between this catalog and
+    a reference catalog.
+
+    .. note::
+        The tangent plane is a plane tangent to the celestial sphere and it
+        must be not distorted, that is, if *image* coordinates are distorted,
+        then distortion correction must be applied to them before tangent
+        plane coordinates are computed. Alternatively, one can think that
+        undistorted world coordinates are projected from the sphere onto the
+        tangent plane.
+
+    """
+    def __init__(self, searchrad=1.0, separation=0.5, use2dhist=True,
+                 xoffset=0.0, yoffset=0.0, tolerance=1.0,
+                 bright_fraction=0.2, minobj=3):
+        """
+        Parameters
+        ----------
+
+        searchrad : float, optional
+            The search radius for a match (in units of the tangent plane).
+
+        separation : float, optional
+            The  minimum  separation in the tangent plane (in units of
+            the tangent plane) for sources in the image and reference
+            catalogs in order to be considered to be disctinct sources.
+            Objects closer together than ``separation`` distance
+            are removed from the image and reference coordinate catalogs prior
+            to matching. This parameter gets passed directly to
+            :py:func:`~stsci.stimage.xyxymatch` for use in matching the object
+            lists from each image with the reference catalog's object list.
+
+        use2dhist : bool, optional
+            Use 2D histogram to find initial offset?
+
+        xoffset : float, optional
+            Initial estimate for the offset in X (in units of the tangent
+            plane) between the sources in the image and the reference catalogs.
+            This offset will be used for all input images provided.
+            This parameter is ignored when ``use2dhist`` is `True`.
+
+        yoffset : float, optional
+            Initial estimate for the offset in Y (in units of the tangent
+            plane) between the sources in the image and the reference catalogs.
+            This offset will be used for all input images provided.
+            This parameter is ignored when ``use2dhist`` is `True`.
+
+        tolerance : float, optional
+            The matching tolerance (in units of the tangent plane) after
+            applying an initial solution derived from the 'triangles'
+            algorithm.  This parameter gets passed directly to
+            :py:func:`~stsci.stimage.xyxymatch` for use in matching
+            the object lists from each image with the reference image's object
+            list.
+
+        bright_fraction : float, optional
+            The percent of brightest sources from the input catalog to use for
+            the initial estimate of the offset.  That actual value used will
+            be either the top fraction or `minobj` number of brightest sources
+            or the number of sources with a median separation of at least
+            0.5*searchrad, whichever is greater.
+
+        minobj : int, optional
+            The minimum number of brightest sources to use in determining the
+            initial estimate of the offset between image and reference catalogs.
+            This will only be used if the `fraction`*number of sources is less than
+            `minobj` to insure enough sources to recognize a common offset.
+
+        """
+        self._use2dhist = use2dhist
+
+        if searchrad > 0:
+            self._searchrad = searchrad
+        else:
+            raise ValueError("'searchrad' must be a positive number.")
+
+        if separation > 0:
+            self._separation = separation
+        else:
+            raise ValueError("'separation' must be a positive number.")
+
+        if tolerance > 0:
+            self._tolerance = tolerance
+        else:
+            raise ValueError("'tolerance' must be a positive number.")
+
+        if 0 < bright_fraction < 1:
+            self._bright_fraction = bright_fraction
+        else:
+            raise ValueError("'bright_fraction' must be between 0-1")
+
+        if minobj > 0:
+            self._minobj = minobj
+        else:
+            raise ValueError("'minobj' must be a positive number")
+
+        self._xoffset = float(xoffset)
+        self._yoffset = float(yoffset)
+
+    def __call__(self, refcat, imcat, tp_wcs=None):
+        """ Performs catalog matching.
+
+        Parameters
+        ----------
+
+        refcat : astropy.table.Table
+            A reference source catalog. When a tangent-plane ``WCS`` is
+            provided through ``tp_wcs``, the catalog must contain ``'RA'`` and
+            ``'DEC'`` columns which indicate reference source world
+            coordinates (in degrees). Alternatively, when ``tp_wcs`` is `None`,
+            reference catalog must contain ``'TPx'`` and ``'TPy'`` columns that
+            provide undistorted (distortion-correction applied) source
+            coordinates in some *tangent plane*. In this case, the ``'RA'``
+            and ``'DEC'`` columns in the ``refcat`` catalog will be ignored.
+
+        imcat : astropy.table.Table
+            Source catalog associated with an image. Must contain ``'x'`` and
+            ``'y'`` columns which indicate source coordinates (in pixels) in
+            the associated image. Alternatively, when ``tp_wcs`` is `None`,
+            catalog must contain ``'TPx'`` and ``'TPy'`` columns that
+            provide undistorted (distortion-correction applied) source
+            coordinates in **the same**\ *tangent plane* used to define
+            ``refcat``'s tangent plane coordinates. In this case, the ``'x'``
+            and ``'y'`` columns in the ``imcat`` catalog will be ignored.
+
+        tp_wcs : TPWCS, None, optional
+            A ``WCS`` that defines a tangent plane onto which both
+            reference and image catalog sources can be projected. For this
+            reason, ``tp_wcs`` is associated with the image in which sources
+            from the ``imcat`` catalog were found in the sense that ``tp_wcs``
+            must be able to map image coordinates ``'x'`` and ``'y'`` from the
+            ``imcat`` catalog to the tangent plane. When ``tp_wcs`` is
+            provided, the ``'TPx'`` and ``'TPy'`` columns in both ``imcat`` and
+            ``refcat`` catalogs will be ignored (if present).
+
+        Returns
+        -------
+        (refcat_idx, imcat_idx) : tuple of numpy.ndarray
+            A tuple of two 1D `numpy.ndarray` containing indices of matched
+            sources in the ``refcat`` and ``imcat`` catalogs accordingly.
+
+        """
+        print("imcat colnames: {}".format(imcat.colnames))
+        # Check catalogs:
+        if not isinstance(refcat, astropy.table.Table):
+            raise TypeError("'refcat' must be an instance of "
+                            "astropy.table.Table")
+
+        if len(refcat) < 1:
+            raise ValueError("Reference catalog must contain at least one "
+                             "source.")
+
+        if not isinstance(imcat, astropy.table.Table):
+            raise TypeError("'imcat' must be an instance of "
+                            "astropy.table.Table")
+
+        if len(imcat) < 1:
+            raise ValueError("Image catalog must contain at least one "
+                             "source.")
+
+        if tp_wcs is None:
+            if 'TPx' not in refcat.colnames or 'TPy' not in refcat.colnames:
+                raise KeyError("When tangent plane WCS is not provided, "
+                               "'refcat' must contain both 'TPx' and 'TPy' "
+                               "columns.")
+
+            if 'TPx' not in imcat.colnames or 'TPy' not in imcat.colnames:
+                raise KeyError("When tangent plane WCS is not provided, "
+                               "'imcat' must contain both 'TPx' and 'TPy' "
+                               "columns.")
+
+            imxy = np.asarray([imcat['TPx'], imcat['TPy']]).T
+            refxy = np.asarray([refcat['TPx'], refcat['TPy']]).T
+
+        else:
+            if 'RA' not in refcat.colnames or 'DEC' not in refcat.colnames:
+                raise KeyError("When tangent plane WCS is provided,  'refcat' "
+                               "must contain both 'RA' and 'DEC' columns.")
+
+            if 'x' not in imcat.colnames or 'y' not in imcat.colnames:
+                raise KeyError("When tangent plane WCS is provided,  'imcat' "
+                               "must contain both 'x' and 'y' columns.")
+
+            # compute x & y in the tangent plane provided by tp_wcs:
+            imxy = np.asarray(
+                tp_wcs.det_to_tanp(imcat['x'], imcat['y'])
+            ).T
+
+            refxy = np.asarray(
+                tp_wcs.world_to_tanp(refcat['RA'], refcat['DEC'])
+            ).T
+
+        imcat_name = imcat.meta.get('name', 'Unnamed')
+        refcat_name = refcat.meta.get('name', 'Unnamed')
+
+        log.info("Matching sources from '{:s}' catalog with sources from the "
+                 "reference '{:s}' catalog."
+                 .format(imcat_name, refcat_name))
+
+        tolerance = self._tolerance
+
+        ps = 1.0 if tp_wcs is None else tp_wcs.tanp_center_pixel_scale
+
+        # start by selecting N brightest sources in imcat based on user parameters
+        print("imcat columns: {}".format(imcat.colnames))
+        bright_indx = np.argsort(imcat['flux']).tolist()
+        num_fract = int(np.ceil(len(bright_indx)*self._bright_fraction))
+        num_bright = max(self._minobj, num_fract)
+        cat_indx = bright_indx[:num_bright]
+        # compute median separation of 'num_bright' brightest sources
+        cat1 = np.column_stack((imcat['x'][cat_indx], imcat['y'][cat_indx]))
+        cat_separation = distance_matrix(cat1, cat1)
+        avg_separation = stats.mode(cat_separation, axis=0)[0]
+        print('avg_separation: {}  cat_separation: {}'.format(avg_separation, cat_separation))
+        # Try to select brightest sources with sufficient separation
+        # to avoid cross-matching confusion
+        # Default to using 'minobj' number of sources regardless of separation
+        if avg_separation <= self._searchrad * 0.6:
+                for n in np.arange(num_fract, self._minobj, -1):
+                    cat_indx = bright_indx[:n]
+                    cat1 = np.column_stack((imcat['x'][cat_indx], imcat['y'][cat_indx]))
+                    cat_separation = distance_matrix(cat1, cat1)
+                    avg_separation = stats.mode(cat_separation)[0]
+                    if avg_separation <= self._searchrad * 0.6:
+                        break
+        # With 'cat_indx' computed, use these to try to find an initial offset
+        # between imcat and refcat
+        # Determine xyoff (X,Y offset) and tolerance
+        # to be used with xyxymatch:
+        izpxoff, izpyoff, iflux, izpqual = build_xy_zeropoint(
+            imxy[cat_indx] / ps,
+            refxy / ps,
+            searchrad=self._searchrad
+        )
+
+        if izpqual is None:
+            xyoff = (0.0, 0.0)
+        else:
+            xyoff = (izpxoff * ps, izpyoff * ps)
+        """
+        if self._use2dhist:
+            # Determine xyoff (X,Y offset) and tolerance
+            # to be used with xyxymatch:
+            zpxoff, zpyoff, flux, zpqual = build_xy_zeropoint(
+                imxy / ps,
+                refxy / ps,
+                searchrad=self._searchrad
+            )
+
+            if zpqual is None:
+                xyoff = (0.0, 0.0)
+            else:
+                xyoff = (zpxoff * ps, zpyoff * ps)
+
+        else:
+            xyoff = (self._xoffset * ps, self._yoffset * ps)
+        """
+        matches = xyxymatch(
+            imxy[cat_indx],
+            refxy,
+            origin=xyoff,
+            tolerance=ps * tolerance,
+            separation=ps * self._separation
+        )
+
 
         return matches['ref_idx'], matches['input_idx']
 
